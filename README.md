@@ -1,4 +1,4 @@
-A light weight example on hooking the Windows API using Rust and monitoring function calls within a process
+This is an example of hooking the `MessageBoxA` function in the Win32 API.
 
 ## Build
 
