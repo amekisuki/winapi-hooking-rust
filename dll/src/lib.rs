@@ -1,7 +1,10 @@
-use windows::{core::PCSTR, Win32::{
-    Foundation::HWND,
-    // UI::WindowsAndMessaging::{MESSAGEBOX_RESULT, MESSAGEBOX_STYLE},
-}};
+use windows::{
+    core::PCSTR,
+    Win32::{
+        Foundation::HWND,
+        // UI::WindowsAndMessaging::{MESSAGEBOX_RESULT, MESSAGEBOX_STYLE},
+    },
+};
 
 // MessageBoxAProxy
 #[no_mangle]
@@ -14,7 +17,9 @@ pub extern "system" fn message_box_a_proxy_func(
     println!("HOOKED");
     println!("  hwnd: {hwnd:?}");
     println!("  lptext: '{}'", unsafe { lptext.to_string().unwrap() });
-    println!("  lpcaption: '{}'", unsafe { lpcaption.to_string().unwrap() });
+    println!("  lpcaption: '{}'", unsafe {
+        lpcaption.to_string().unwrap()
+    });
     println!("  utype: {:?}", utype);
 
     0
@@ -31,14 +36,14 @@ pub extern "system" fn message_box_a_proxy_func(
     // }
 }
 
-static mut GATEWAY_PTR: Option<extern "system" fn(HWND, PCSTR, PCSTR, u32) -> i32> = None;
+// static mut GATEWAY_PTR: Option<extern "system" fn(HWND, PCSTR, PCSTR, u32) -> i32> = None;
 
-#[no_mangle]
-pub extern "system" fn set_gateway(ptr: usize) -> () {
-    println!("Setting gateway");
-    unsafe {
-        GATEWAY_PTR = Some(std::mem::transmute(ptr));
-    }
+// #[no_mangle]
+// pub extern "system" fn set_gateway(ptr: usize) -> () {
+//     println!("Setting gateway");
+//     unsafe {
+//         GATEWAY_PTR = Some(std::mem::transmute(ptr));
+//     }
 
-    println!("{:x?}", unsafe { GATEWAY_PTR });
-}
+//     println!("{:x?}", unsafe { GATEWAY_PTR });
+// }

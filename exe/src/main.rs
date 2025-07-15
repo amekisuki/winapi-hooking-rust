@@ -1,12 +1,13 @@
 // Based on work from https://kylehalladay.com/blog/2020/11/13/Hooking-By-Example.html
+mod util;
 
+use crate::util::find_func_addr;
 use std::ffi::c_void;
 use windows::{
     core::s,
     Win32::{
         System::{
             Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory},
-            LibraryLoader::{GetProcAddress, LoadLibraryA},
             Memory::{VirtualProtect, PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS},
             Threading::GetCurrentProcess,
         },
@@ -17,15 +18,13 @@ use windows::{
 static N_SIZE: usize = 13;
 
 fn main() {
-    let lib_name = s!("user32.dll");
-    let h_lib = unsafe { LoadLibraryA(lib_name).expect("Could not get library") };
-
-    let func_to_hook = s!("MessageBoxA");
-    let func_addr = unsafe { GetProcAddress(h_lib, func_to_hook).expect("Could not find function") }
-        as *const c_void;
+    let func_addr = find_func_addr("user32.dll", "MessageBoxA").unwrap_or_else(|err| {
+        println!("Error: {}", err.details);
+        std::process::exit(1);
+    });
 
     // Save the protection flags for the region
-    let mut original_protect: PAGE_PROTECTION_FLAGS = PAGE_PROTECTION_FLAGS::default();
+    let mut original_protect = PAGE_PROTECTION_FLAGS::default();
     unsafe {
         VirtualProtect(
             func_addr,
@@ -60,12 +59,11 @@ fn main() {
         0x49, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x41, 0xFF, 0xE2,
     ];
 
-    // This DLL holds the proxy function
-    let dll_module = unsafe { LoadLibraryA(s!("rs_test_dll.dll")).expect("Cannot open module") };
-
-    let proc_addr = unsafe {
-        GetProcAddress(dll_module, s!("message_box_a_proxy_func")).expect("Cannot Get Proc Address")
-    } as *const () as usize;
+    let proc_addr =
+        find_func_addr("rs_test_dll.dll", "message_box_a_proxy_func").unwrap_or_else(|err| {
+            println!("Error: {}", err.details);
+            std::process::exit(1);
+        }) as *const () as usize;
 
     println!("Proxy Address: {proc_addr:x}");
 
@@ -85,8 +83,13 @@ fn main() {
     };
 
     unsafe {
-        VirtualProtect(func_addr, N_SIZE, original_protect, &mut PAGE_PROTECTION_FLAGS::default())
-            .expect("Unable to change access permissions to memory back")
+        VirtualProtect(
+            func_addr,
+            N_SIZE,
+            original_protect,
+            &mut PAGE_PROTECTION_FLAGS::default(),
+        )
+        .expect("Unable to change access permissions to memory back")
     };
 
     unsafe { MessageBoxA(None, s!("hello world"), s!("lmao"), MESSAGEBOX_STYLE(1)) };
