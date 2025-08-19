@@ -6,7 +6,7 @@ use std::{cmp, ffi::c_void, ptr};
 use windows::Win32::System::{
     Memory::{
         VirtualAlloc, VirtualProtect, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
-        PAGE_PROTECTION_FLAGS,
+        PAGE_PROTECTION_FLAGS, PAGE_READWRITE,
     },
     SystemInformation::{GetSystemInfo, SYSTEM_INFO},
 };
@@ -29,17 +29,35 @@ impl X64Instructions {
 #[derive(Debug)]
 pub struct TrampolineMem {
     pub addr: *mut c_void,
-    pub size: u64,
+    pub size: Option<u64>,
 }
 impl TrampolineMem {
-    fn new(addr: *mut c_void, size: u64) -> Self {
+    fn new(addr: *mut c_void, size: Option<u64>) -> Self {
         Self { addr, size }
     }
 }
 
+/// Private function used by `build_trampoline()` to create the jmp 
+/// back to the original function
+/// 
 /// Copy the first MIN_SIZE bytes from the prologue of a function
 /// Decode the bytes using iced_x86 disassembler into Instructions
-pub fn steal_bytes(func_addr: *const c_void) -> X64Instructions {
+///
+///  # Arguments
+/// 
+/// * `func_addr`: Address of function to hook (from `GetProcAddress()`)
+/// 
+/// # Returns
+/// 
+/// * `X64Instructions`: struct containing the copied x86 instructions and size in bytes
+/// 
+/// # Examples
+/// 
+/// ```
+/// let func_addr = find_func_addr("user32.dll", "GetCursorPos").unwrap();
+/// let stolen_bytes = steal_bytes(func_addr).unwrap();
+/// ```
+fn steal_bytes(func_addr: *const c_void) -> X64Instructions {
     let mut saved_buffer: [u8; MIN_SIZE] = [0; MIN_SIZE];
 
     // Get the prologue of the function
@@ -73,6 +91,26 @@ pub fn steal_bytes(func_addr: *const c_void) -> X64Instructions {
     X64Instructions::new(instructions, read)
 }
 
+/// Alloc a trampoline in memory near the original function.
+/// 
+/// Placing it near the original function is important as x86
+/// will not allow `jmp`s further than 2GB
+/// 
+/// # Arguments
+/// 
+/// * `func_addr`: Address of function to hook (from `GetProcAddress()`)
+/// 
+/// # Returns
+/// 
+/// * `Ok(TrampolineMem)`: struct containing the trampoline memory address and size
+/// * `Err(HookError)`: if the trampoline cannot be allocated
+/// 
+/// # Examples
+/// 
+/// ```
+/// let func_addr = find_func_addr("user32.dll", "GetCursorPos").unwrap();
+/// let mut trampoline = alloc_trampoline_mem_near_address(func_addr).unwrap();
+/// ```
 pub fn alloc_trampoline_mem_near_address(
     func_addr: *const c_void,
 ) -> Result<TrampolineMem, HookError> {
@@ -118,7 +156,7 @@ pub fn alloc_trampoline_mem_near_address(
                 )
             };
             if !addr.is_null() {
-                return Ok(TrampolineMem::new(addr, size));
+                return Ok(TrampolineMem::new(addr, Some(size)));
             }
         }
 
@@ -132,7 +170,7 @@ pub fn alloc_trampoline_mem_near_address(
                 )
             };
             if !addr.is_null() {
-                return Ok(TrampolineMem::new(addr, size));
+                return Ok(TrampolineMem::new(addr, Some(size)));
             }
         }
 
@@ -146,19 +184,44 @@ pub fn alloc_trampoline_mem_near_address(
     }
 }
 
-pub fn build_trampoline(func_addr: *const c_void, dst_hook_mem: &mut TrampolineMem) {
+/// Adds instructions to the trampoline allocated by the caller
+/// 
+/// Steal bytes from the original function, then append a jump to
+/// the end get back to the original function
+/// 
+/// # Arguments
+/// 
+/// * `func_addr`: Address of function to hook (from `GetProcAddress()`)
+/// * `dst_hook_mem`: &mut TrampolineMem
+/// 
+/// # Examples
+/// 
+/// ```
+/// let func_addr = find_func_addr("user32.dll", "GetCursorPos").unwrap();
+/// let mut trampoline = alloc_trampoline_mem_near_address(func_addr).unwrap();
+/// 
+/// build_trampoline(func_addr, &mut trampoline);
+/// ```
+pub fn build_trampoline(func_addr: *const c_void, dst_hook_mem: &mut TrampolineMem) -> () {
     let stolen_bytes = steal_bytes(func_addr);
 
+    // Take the original function address
+    // add the number of stolen bytes to the pointer
+    // that will be where we need to "trampoline" back to
     let jmp_back_addr = unsafe { func_addr.add(stolen_bytes.num_bytes) };
 
     let mut instructions = stolen_bytes.instrs;
 
     // Adding jmp to get back to original function
+    //
+    // ASM:
+    //     mov r10, addr
+    //     jmp r10
     instructions.push(
-        Instruction::with2(Code::Mov_r64_imm64, Register::R10, jmp_back_addr as u64).unwrap(), // mov r10, addr
+        Instruction::with2(Code::Mov_r64_imm64, Register::R10, jmp_back_addr as u64).unwrap(),
     );
     instructions.push(
-        Instruction::with1(Code::Jmp_rm64, Register::R10).unwrap(), // jmp r10
+        Instruction::with1(Code::Jmp_rm64, Register::R10).unwrap(),
     );
 
     // The block encoder should auto-magically fix any RIP relative addressing
@@ -177,14 +240,21 @@ pub fn build_trampoline(func_addr: *const c_void, dst_hook_mem: &mut TrampolineM
         )
     };
 
-    dst_hook_mem.size = encoded_instrs.code_buffer.len() as u64;
+    dst_hook_mem.size = Some(encoded_instrs.code_buffer.len() as u64);
 }
 
 /// Overwrites a given function with a jmp instr to jump to the intended proxy function
+/// 
+/// # Arguments
+/// 
+/// * `func_addr`: Address of function to hook (from `GetProcAddress()`)
+/// * `proxy_func`: Address to overwrite the original function with
 pub fn overwrite_func_with_relay(func_addr: *const c_void, proxy_func: *const c_void) {
+    // mov r10, addr
+    // jmp r10
     let instructions: Vec<Instruction> = vec![
-        Instruction::with2(Code::Mov_r64_imm64, Register::R10, proxy_func as u64).unwrap(), // mov r10, addr
-        Instruction::with1(Code::Jmp_rm64, Register::R10).unwrap(),                         // jmp r10
+        Instruction::with2(Code::Mov_r64_imm64, Register::R10, proxy_func as u64).unwrap(),
+        Instruction::with1(Code::Jmp_rm64, Register::R10).unwrap(),
     ];
 
     let encoded_instrs = BlockEncoder::encode(
@@ -194,7 +264,7 @@ pub fn overwrite_func_with_relay(func_addr: *const c_void, proxy_func: *const c_
     )
     .unwrap();
 
-    // Overwrite the function prologue with a jmp to the proxy function!
+    println!("Instr size {}", encoded_instrs.code_buffer.len());
 
     // 1) Change the protection level of the memory to be writable
     let mut original_protect = PAGE_PROTECTION_FLAGS::default();
@@ -202,7 +272,7 @@ pub fn overwrite_func_with_relay(func_addr: *const c_void, proxy_func: *const c_
         VirtualProtect(
             func_addr,
             encoded_instrs.code_buffer.len(),
-            PAGE_EXECUTE_READWRITE,
+            PAGE_READWRITE,
             &mut original_protect,
         )
         .expect("Unable to change access permissions to memory")
