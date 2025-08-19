@@ -13,14 +13,9 @@
           "build",
           "--bin=rs-test",
           "--package=rs-test"
-        ],
-        "filter": {
-          "name": "rs-test",
-          "kind": "bin"
-        }
+        ]
       },
-      "args": [],
-      "cwd": "${workspaceFolder}"
+
     }
   ]
 }

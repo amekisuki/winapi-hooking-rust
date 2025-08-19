@@ -1,22 +1,17 @@
-#![allow(unused_imports)]
 use std::{
-    ffi::{c_void, CString, NulError, OsStr, OsString},
+    ffi::{c_void, CString, OsStr},
     fmt,
-    os::windows::ffi::OsStrExt
+    os::windows::ffi::OsStrExt,
 };
 
 use windows::{
-    core::{w, PCSTR, PCWSTR, PSTR, PWSTR},
-    Win32::System::LibraryLoader::{
-        GetModuleHandleA, GetProcAddress, LoadLibraryA, LoadLibraryExA, LoadLibraryW,
-        LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_SYSTEM32,
-    },
+    core::{PCSTR, PCWSTR},
+    Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW},
 };
 
 #[derive(Debug)]
 pub enum HookError {
     LoadLibrary(String),
-    GetModuleHandle(String),
     FuncAddr(String),
     Alloc(String),
     Parse(String),
@@ -25,7 +20,6 @@ impl fmt::Display for HookError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             HookError::LoadLibrary(msg) => write!(f, "LoadLibrary: {}", msg),
-            HookError::GetModuleHandle(msg) => write!(f, "GetModuleHandle: {}", msg),
             HookError::FuncAddr(msg) => write!(f, "FuncAddr: {}", msg),
             HookError::Alloc(msg) => write!(f, "Alloc: {}", msg),
             HookError::Parse(msg) => write!(f, "Unable to parse: {}", msg),
@@ -59,8 +53,12 @@ pub fn find_func_addr(lib_name: &str, func_name: &str) -> Result<*const c_void, 
     };
 
     let wide_func = match CString::new(func_name) {
-        Err(_) => return Err(HookError::Parse(format!("Unable to parse str into CString {func_name}"))),
-        Ok(c) => c
+        Err(_) => {
+            return Err(HookError::Parse(format!(
+                "Unable to parse str into CString {func_name}"
+            )))
+        }
+        Ok(c) => c,
     };
     let func_name = PCSTR(wide_func.as_ptr() as *const u8);
 
