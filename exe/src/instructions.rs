@@ -35,14 +35,7 @@ impl TrampolineMem {
     }
 }
 
-pub struct RelayFunction {
-    pub instrs: Vec<Instruction>,
-}
-impl RelayFunction {
-    fn new(instrs: Vec<Instruction>) -> Self {
-        Self { instrs }
-    }
-}
+type RelayFunction = Vec<Instruction>;
 
 /// Private function used by `build_trampoline()` to create the jmp
 /// back to the original function
@@ -77,7 +70,7 @@ pub fn steal_bytes(func_addr: *const c_void, min_bytes: usize) -> StolenBytes {
     let p_saved_buffer = saved_buffer.as_mut_ptr();
 
     let code = unsafe { std::slice::from_raw_parts(p_saved_buffer, N_BYTES) };
-    let mut dec = Decoder::with_ip(64, code, p_saved_buffer as u64, DecoderOptions::NONE);
+    let mut dec = Decoder::new(64, code, DecoderOptions::NONE);
 
     let mut read = 0usize;
     let mut instructions: Vec<Instruction> = Vec::new();
@@ -251,16 +244,15 @@ pub fn build_trampoline(
 /// * `func_addr`: Address of function to hook (from `GetProcAddress()`)
 /// * `proxy_func`: Address to overwrite the original function with
 pub fn install_hook(relay_function: RelayFunction, func_addr: *const c_void) {
-    let encoded_instrs = encode_relay_function(&relay_function.instrs, func_addr);
-
-    let min_overwrite_len = encoded_instrs.len();
+    println!("\nInstalling hook...");
+    let min_overwrite_len = byte_len_instructions(&relay_function);
 
     // Somewhat arbitrary amount of bytes to read to ensure we get enough full instructions
     const N_BYTES: usize = 50;
 
     // Get a copy of the function prologue to start disassembling it
     let mut func_mem = [0; N_BYTES];
-    unsafe { std::ptr::copy_nonoverlapping(func_addr as *mut u8, func_mem.as_mut_ptr(), 50) };
+    unsafe { std::ptr::copy_nonoverlapping(func_addr as *mut u8, func_mem.as_mut_ptr(), N_BYTES) };
 
     // Create a decoder to start looping over the function prologue
     let code = unsafe { std::slice::from_raw_parts(func_mem.as_ptr(), N_BYTES) };
@@ -281,6 +273,18 @@ pub fn install_hook(relay_function: RelayFunction, func_addr: *const c_void) {
         instructions.push(instr);
     }
 
+    println!("instruction addr {:?}", &instructions[2]);
+    println!("target func addr {func_addr:x?}");
+
+    // {
+    //     // temp code
+    //     let mut e = iced_x86::Encoder::new(64);
+
+    //     for i in &instructions {
+    //         e.encode(&i, func_addr as u64).unwrap();
+    //     }
+    // }
+
     let prologue_bytes = BlockEncoder::encode(
         64,
         InstructionBlock::new(&instructions, func_addr as u64),
@@ -291,6 +295,9 @@ pub fn install_hook(relay_function: RelayFunction, func_addr: *const c_void) {
 
     println!("new instr {}", prologue_bytes.len());
     println!("new instr buffer {:x?}", &prologue_bytes);
+    println!("new instr buffer addr {:p}", &prologue_bytes);
+
+    let encoded_instrs = encode_relay_function(&relay_function, func_addr);
 
     println!("Instr buffer {:x?}", &encoded_instrs);
     println!("Instr size {}", encoded_instrs.len());
@@ -338,18 +345,70 @@ pub fn encode_relay_function(relay_func: &[Instruction], func_addr: *const c_voi
     .code_buffer
 }
 
-pub fn build_relay_function(proxy_func: *const c_void, n_nops: usize) -> RelayFunction {
-    // mov r10, addr
-    // jmp r10
+pub fn byte_len_instructions(relay_func: &[Instruction]) -> usize {
+    let placeholder_addr = 0u64;
+
+    BlockEncoder::encode(
+        64,
+        InstructionBlock::new(relay_func, placeholder_addr),
+        BlockEncoderOptions::NONE,
+    )
+    .unwrap()
+    .code_buffer
+    .len()
+}
+
+/// Create the initial relay function
+///
+/// This may not be the correct size to replace a function prologue.
+/// It may split bytes. So find the length of the valid instructions
+/// in the prologue, then use `pad_relay_function()` to pad out with
+/// valid instructions
+///
+/// # Returns
+///
+/// - `RelayFunction` A vec of instructions representing the following
+///
+/// ```asm
+/// mov r10, proxy_func
+/// jmp r10
+/// ```
+pub fn init_relay_function(proxy_func: *const c_void) -> RelayFunction {
     let mut a = CodeAssembler::new(64).unwrap();
 
     a.mov(r10, proxy_func as u64).unwrap();
     a.jmp(r10).unwrap();
 
-    // For if/when we need to re-encode the relay function, we can pad it with no-ops
+    a.instructions().to_vec()
+}
+
+/// Pad the relay function with `nops` up to a certain bytes length
+/// 
+/// # Arguments
+/// 
+/// * `relay_func` - Vec of instructions to append to
+/// * `n_nops` - number of nops in order to add to function
+/// 
+/// # Returns
+/// 
+/// - `RelayFunction` A vec of instructions representing the following with N nops appended
+/// 
+/// ```asm
+/// mov r10, proxy_func
+/// jmp r10
+/// nop
+/// ...
+/// ```
+pub fn pad_relay_function(mut relay_func: RelayFunction, n_nops: usize) -> RelayFunction {
+    let mut a = CodeAssembler::new(64).unwrap();
+
     for _ in 0..n_nops {
         a.nop().unwrap();
     }
 
-    RelayFunction::new(a.instructions().to_vec())
+    a.instructions()
+        .iter()
+        .for_each(|inst| relay_func.push(*inst));
+
+    relay_func
 }
