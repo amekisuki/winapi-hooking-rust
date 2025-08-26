@@ -4,6 +4,7 @@
     "lpcaption",
     "lptext",
     "MESSAGEBOX",
+    "nops",
     "PCSTR",
     "READWRITE",
     "utype"

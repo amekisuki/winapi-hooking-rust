@@ -13,6 +13,7 @@ use windows::{
     Win32::{
         Foundation::{HANDLE, HWND, POINT},
         System::DataExchange::GetClipboardData,
+        System::Threading::Sleep,
         UI::WindowsAndMessaging::{GetCursorPos, MessageBoxA, MESSAGEBOX_STYLE},
     },
 };
@@ -24,21 +25,24 @@ use crate::instructions::{
 type MessageBoxASig = unsafe extern "system" fn(HWND, PCSTR, PCSTR, u32) -> i32;
 type GetCursorPosSig = unsafe extern "system" fn(POINT) -> BOOL;
 type GetClipboardDataSig = unsafe extern "system" fn(u32) -> HANDLE;
+type SleepSig = unsafe extern "system" fn(u32) -> c_void;
 
 // Global pointer to the trampoline code
 static P_TRAMPOLINE: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 
 fn main() {
-    // let func_addr = find_func_addr("user32.dll", "MessageBoxA").unwrap();
-    let func_addr = find_func_addr("user32.dll", "GetCursorPos").unwrap();
+    let func_addr = find_func_addr("user32.dll", "MessageBoxA").unwrap();
+    // let func_addr = find_func_addr("user32.dll", "GetCursorPos").unwrap();
     // let func_addr = find_func_addr("user32.dll", "GetClipboardData").unwrap();
+    // let func_addr = find_func_addr("Kernel32.dll", "Sleep").unwrap();
 
     // Use for disassembling
-    println!("dis -s {func_addr:x?} -c 10 -b ");
+    println!("Actual Func: dis -s {func_addr:x?} -c 10 -b ");
 
-    // let proxy_func = message_box_a_proxy_func as *const c_void;
-    let proxy_func = get_cursor_pos_proxy as *const c_void;
+    let proxy_func = message_box_a_proxy_func as *const c_void;
+    // let proxy_func = get_cursor_pos_proxy as *const c_void;
     // let proxy_func = get_clipboard_data_proxy as *const c_void;
+    // let proxy_func = sleep_proxy as *const c_void;
 
     // 1) Create the relay function that will overwrite the MessageBoxA function prologue
     let mut relay_func = init_relay_function(proxy_func);
@@ -61,8 +65,6 @@ fn main() {
     if stolen_bytes.num_bytes > relay_func_len {
         relay_func = pad_relay_function(relay_func, stolen_bytes.num_bytes - relay_func_len);
     }
-    let relay_func_len = byte_len_instructions(&relay_func);
-    println!("Relay function padded to length {relay_func_len}");
 
     // 5) Alloc memory near the original function for the trampoline
     let mut trampoline = alloc_trampoline_mem_near_address(func_addr).unwrap();
@@ -70,22 +72,27 @@ fn main() {
     // 6) Build the trampoline
     build_trampoline(func_addr, &stolen_bytes, &mut trampoline);
     println!("Trampoline size: {}", trampoline.size.unwrap());
-    println!("{:?}", trampoline.addr);
+    println!("Trampoline addr: {:x?}", trampoline.addr);
 
     // 7) Store a reference to the trampoline addr for the proxy to callback
+    // TODO: Fix RIP relative instructions on trampoline to ensure they point to correct memory
+    //     1) Disassemble actual function: dis -s 0x7ffa4f4c8b70 -c 10 -b
+    //     2) Disassemble actual function after copying: dis -s 0x7ffa4f4c8b70 -c 10 -b
+    //     3) Disable trampoline function: dis -s 0x7ffa4f440000 -c 10 -b
     P_TRAMPOLINE.store(trampoline.addr as *mut (), Ordering::Release);
 
     // 8) Install the hook
-    // TODO: Fix iced_x86 needing to encode far away characters
-    install_hook(relay_func, func_addr);
+    install_hook(relay_func, func_addr, stolen_bytes);
 
-    // unsafe { MessageBoxA(None, s!("hello world"), s!("lmao"), MESSAGEBOX_STYLE(1)) };
+    unsafe { MessageBoxA(None, s!("hello world"), s!("lmao"), MESSAGEBOX_STYLE(1)) };
 
-    let mut point = POINT::default();
-    let v = unsafe { GetCursorPos(&mut point) };
-    println!("{v:?}");
+    // let mut point = POINT::default();
+    // unsafe { GetCursorPos(&mut point).unwrap() };
+    // println!("{point:?}");
 
     // let _ = unsafe { GetClipboardData(0) };
+
+    // unsafe { Sleep(5000) };
 }
 
 #[no_mangle]
@@ -105,7 +112,6 @@ pub extern "system" fn message_box_a_proxy_func(
 
     // Call original function
     let p = P_TRAMPOLINE.load(std::sync::atomic::Ordering::Acquire);
-    println!("{p:?}");
     let orig = unsafe { std::mem::transmute::<*mut (), MessageBoxASig>(p) };
 
     let new_text = s!("hooged");
@@ -120,15 +126,12 @@ pub extern "system" fn get_cursor_pos_proxy(mut lppoint: POINT) -> BOOL {
 
     // Call original function
     let p = P_TRAMPOLINE.load(std::sync::atomic::Ordering::Acquire);
-    println!("{p:?}");
-    // let orig = unsafe { std::mem::transmute::<*mut (), GetCursorPosSig>(p) };
+    let orig = unsafe { std::mem::transmute::<*mut (), GetCursorPosSig>(p) };
 
     lppoint.x = 69;
     lppoint.y = 420;
 
-    BOOL(1)
-
-    // unsafe { orig(lppoint) }
+    return unsafe { orig(lppoint) }
 }
 
 #[no_mangle]
@@ -138,8 +141,20 @@ pub extern "system" fn get_clipboard_data_proxy(u_format: u32) -> HANDLE {
 
     // Call original function
     let p = P_TRAMPOLINE.load(std::sync::atomic::Ordering::Acquire);
-    println!("{p:?}");
     let orig = unsafe { std::mem::transmute::<*mut (), GetClipboardDataSig>(p) };
 
     unsafe { orig(u_format) }
+}
+
+#[no_mangle]
+pub extern "system" fn sleep_proxy(ms: u32) -> () {
+    println!("HOOKED");
+    println!("  Milliseconds: {ms:?}");
+
+    // Call original function
+    let p = P_TRAMPOLINE.load(std::sync::atomic::Ordering::Acquire);
+    let orig = unsafe { std::mem::transmute::<*mut (), SleepSig>(p) };
+
+    println!("Actually sleeping for 2 seconds");
+    unsafe { orig(2) };
 }

@@ -12,6 +12,7 @@ windows = { version = "0.61.3", features = [
   "Win32_System_Memory",
   "Win32_System_SystemInformation",
   "Win32_System_DataExchange",
+  "Win32_System_Threading"
 ] }
 
 [dependencies.iced-x86]

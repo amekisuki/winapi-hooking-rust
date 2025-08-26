@@ -4,11 +4,10 @@ use iced_x86::{
 };
 use std::{cmp, ffi::c_void, ptr};
 use windows::Win32::System::{
-    Memory::{
+    Diagnostics::Debug::FlushInstructionCache, Memory::{
         VirtualAlloc, VirtualProtect, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
         PAGE_PROTECTION_FLAGS, PAGE_READWRITE,
-    },
-    SystemInformation::{GetSystemInfo, SYSTEM_INFO},
+    }, SystemInformation::{GetSystemInfo, SYSTEM_INFO}, Threading::GetCurrentProcess
 };
 
 use crate::util::HookError;
@@ -146,7 +145,7 @@ pub fn alloc_trampoline_mem_near_address(
                     Some(high_addr as *const c_void),
                     size as usize,
                     MEM_COMMIT | MEM_RESERVE,
-                    PAGE_EXECUTE_READWRITE,
+                    PAGE_READWRITE, // Start with ReadWrite to not be too obvious, change to Execute later
                 )
             };
             if !addr.is_null() {
@@ -160,7 +159,7 @@ pub fn alloc_trampoline_mem_near_address(
                     Some(low_addr as *const c_void),
                     size as usize,
                     MEM_COMMIT | MEM_RESERVE,
-                    PAGE_EXECUTE_READWRITE,
+                    PAGE_READWRITE, // Start with ReadWrite to not be too obvious, change to Execute later
                 )
             };
             if !addr.is_null() {
@@ -226,12 +225,25 @@ pub fn build_trampoline(
     )
     .unwrap();
 
+    println!("Dst Hook Trampoline: dis -s {:x?} -c 10 -b", dst_hook_mem.addr);
+
     unsafe {
         std::ptr::copy_nonoverlapping(
             encoded_instrs.code_buffer.as_ptr(),
             dst_hook_mem.addr as *mut u8,
             encoded_instrs.code_buffer.len(),
         )
+    };
+
+    // Change protection level on trampoline to allow execution
+    unsafe {
+        VirtualProtect(
+            dst_hook_mem.addr,
+            encoded_instrs.code_buffer.len(),
+            PAGE_EXECUTE_READWRITE, // Set to ReadWriteExecute 
+            &mut PAGE_PROTECTION_FLAGS::default(),
+        )
+        .expect("Unable to change access permissions on Destination Hook memory")
     };
 
     dst_hook_mem.size = Some(encoded_instrs.code_buffer.len() as u64);
@@ -243,64 +255,12 @@ pub fn build_trampoline(
 ///
 /// * `func_addr`: Address of function to hook (from `GetProcAddress()`)
 /// * `proxy_func`: Address to overwrite the original function with
-pub fn install_hook(relay_function: RelayFunction, func_addr: *const c_void) {
+pub fn install_hook(relay_function: RelayFunction, func_addr: *const c_void, stolen_bytes: StolenBytes) {
     println!("\nInstalling hook...");
-    let min_overwrite_len = byte_len_instructions(&relay_function);
 
-    // Somewhat arbitrary amount of bytes to read to ensure we get enough full instructions
-    const N_BYTES: usize = 50;
-
-    // Get a copy of the function prologue to start disassembling it
-    let mut func_mem = [0; N_BYTES];
-    unsafe { std::ptr::copy_nonoverlapping(func_addr as *mut u8, func_mem.as_mut_ptr(), N_BYTES) };
-
-    // Create a decoder to start looping over the function prologue
-    let code = unsafe { std::slice::from_raw_parts(func_mem.as_ptr(), N_BYTES) };
-    let mut dec = Decoder::with_ip(64, code, func_mem.as_mut_ptr() as u64, DecoderOptions::NONE);
-
-    let mut read = 0usize;
-    let mut instructions: Vec<Instruction> = Vec::new();
-
-    // Decode instructions up to the length of our relay function
-    while read < min_overwrite_len {
-        let instr = dec.decode();
-
-        if instr.is_invalid() {
-            break;
-        }
-
-        read += instr.len();
-        instructions.push(instr);
-    }
-
-    println!("instruction addr {:?}", &instructions[2]);
     println!("target func addr {func_addr:x?}");
 
-    // {
-    //     // temp code
-    //     let mut e = iced_x86::Encoder::new(64);
-
-    //     for i in &instructions {
-    //         e.encode(&i, func_addr as u64).unwrap();
-    //     }
-    // }
-
-    let prologue_bytes = BlockEncoder::encode(
-        64,
-        InstructionBlock::new(&instructions, func_addr as u64),
-        BlockEncoderOptions::NONE,
-    )
-    .unwrap()
-    .code_buffer;
-
-    println!("new instr {}", prologue_bytes.len());
-    println!("new instr buffer {:x?}", &prologue_bytes);
-    println!("new instr buffer addr {:p}", &prologue_bytes);
-
     let encoded_instrs = encode_relay_function(&relay_function, func_addr);
-
-    println!("Instr buffer {:x?}", &encoded_instrs);
-    println!("Instr size {}", encoded_instrs.len());
 
     // 1) Change the protection level of the memory to be writable
     let mut original_protect = PAGE_PROTECTION_FLAGS::default();
@@ -319,7 +279,7 @@ pub fn install_hook(relay_function: RelayFunction, func_addr: *const c_void) {
         std::ptr::copy_nonoverlapping(
             encoded_instrs.as_ptr(),
             func_addr as *mut u8,
-            prologue_bytes.len(),
+            stolen_bytes.num_bytes,
         )
     };
 
@@ -333,6 +293,8 @@ pub fn install_hook(relay_function: RelayFunction, func_addr: *const c_void) {
         )
         .expect("Unable to reassign original memory access permissions")
     };
+
+    let _ = unsafe { FlushInstructionCache(GetCurrentProcess(), None, 0) };
 }
 
 pub fn encode_relay_function(relay_func: &[Instruction], func_addr: *const c_void) -> Vec<u8> {
