@@ -31,16 +31,16 @@ type SleepSig = unsafe extern "system" fn(u32) -> c_void;
 static P_TRAMPOLINE: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 
 fn main() {
-    let func_addr = find_func_addr("user32.dll", "MessageBoxA").unwrap();
-    // let func_addr = find_func_addr("user32.dll", "GetCursorPos").unwrap();
+    // let func_addr = find_func_addr("user32.dll", "MessageBoxA").unwrap();
+    let func_addr = find_func_addr("user32.dll", "GetCursorPos").unwrap();
     // let func_addr = find_func_addr("user32.dll", "GetClipboardData").unwrap();
     // let func_addr = find_func_addr("Kernel32.dll", "Sleep").unwrap();
 
     // Use for disassembling
     println!("Actual Func: dis -s {func_addr:x?} -c 10 -b ");
 
-    let proxy_func = message_box_a_proxy_func as *const c_void;
-    // let proxy_func = get_cursor_pos_proxy as *const c_void;
+    // let proxy_func = message_box_a_proxy_func as *const c_void;
+    let proxy_func = get_cursor_pos_proxy as *const c_void;
     // let proxy_func = get_clipboard_data_proxy as *const c_void;
     // let proxy_func = sleep_proxy as *const c_void;
 
@@ -53,10 +53,10 @@ fn main() {
 
     // 3) Steal bytes from the prologue of the function up to the length of the relay_function
     let stolen_bytes = steal_bytes(func_addr, relay_func_len);
-    println!(
-        "Stolen bytes {:?}",
-        byte_len_instructions(&stolen_bytes.instrs)
-    );
+    // println!(
+    //     "Stolen bytes {:?}",
+    //     byte_len_instructions(&stolen_bytes.instrs)
+    // );
     println!("Need {:?} more byte(s)", stolen_bytes.num_bytes - relay_func_len);
 
     // 4) Re-encode the relay function with no-ops
@@ -79,20 +79,25 @@ fn main() {
     //     1) Disassemble actual function: dis -s 0x7ffa4f4c8b70 -c 10 -b
     //     2) Disassemble actual function after copying: dis -s 0x7ffa4f4c8b70 -c 10 -b
     //     3) Disable trampoline function: dis -s 0x7ffa4f440000 -c 10 -b
+
+    // Need to calc 0x7ffe4fc5d22e + 0x4362a = 0x7ffe4fca0858 
     P_TRAMPOLINE.store(trampoline.addr as *mut (), Ordering::Release);
 
     // 8) Install the hook
     install_hook(relay_func, func_addr, stolen_bytes);
 
-    unsafe { MessageBoxA(None, s!("hello world"), s!("lmao"), MESSAGEBOX_STYLE(1)) };
+    // unsafe { MessageBoxA(None, s!("hello world"), s!("lmao"), MESSAGEBOX_STYLE(1)) };
 
-    // let mut point = POINT::default();
-    // unsafe { GetCursorPos(&mut point).unwrap() };
-    // println!("{point:?}");
+    // This doesn't work, I'm assuming because of the int3 instruction that is getting copied to the trampoline
+    let mut point = POINT::default();
+    unsafe { GetCursorPos(&mut point).unwrap() };
+    println!("{point:?}");
 
     // let _ = unsafe { GetClipboardData(0) };
 
+    // println!("eepy time");
     // unsafe { Sleep(5000) };
+    // println!("waky waky");
 }
 
 #[no_mangle]

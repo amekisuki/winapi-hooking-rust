@@ -1,6 +1,5 @@
 use iced_x86::{
-    code_asm::*, BlockEncoder, BlockEncoderOptions, Code, Decoder, DecoderOptions, Instruction,
-    InstructionBlock, Register,
+    code_asm::*, BlockEncoder, BlockEncoderOptions, Code, Decoder, DecoderOptions, Instruction, InstructionBlock, OpKind, Register
 };
 use std::{cmp, ffi::c_void, ptr};
 use windows::Win32::System::{
@@ -69,7 +68,9 @@ pub fn steal_bytes(func_addr: *const c_void, min_bytes: usize) -> StolenBytes {
     let p_saved_buffer = saved_buffer.as_mut_ptr();
 
     let code = unsafe { std::slice::from_raw_parts(p_saved_buffer, N_BYTES) };
-    let mut dec = Decoder::new(64, code, DecoderOptions::NONE);
+
+    // Need to use `.with_ip()` to be able to re-encode relative addresses
+    let mut dec = Decoder::with_ip(64, code, func_addr as u64, DecoderOptions::NONE);
 
     let mut read = 0usize;
     let mut instructions: Vec<Instruction> = Vec::new();
@@ -207,6 +208,12 @@ pub fn build_trampoline(
 
     let mut instructions = stolen_bytes.instrs.clone();
 
+    for mut i in instructions {
+        if i.code() == Code::Int3 {
+            i.set_code(Code::Nop_rm16);
+        }
+    }
+
     // Append `jmp to end of trampoline to "trampoline" back to the original function
     //
     // ASM:
@@ -225,6 +232,8 @@ pub fn build_trampoline(
     )
     .unwrap();
 
+    println!("Wrapping add func {:x?}", func_addr.wrapping_add(stolen_bytes.num_bytes));
+    println!("RIP: {:x?}", encoded_instrs.rip);
     println!("Dst Hook Trampoline: dis -s {:x?} -c 10 -b", dst_hook_mem.addr);
 
     unsafe {
