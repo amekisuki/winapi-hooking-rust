@@ -208,7 +208,7 @@ pub fn build_trampoline(
 
     let mut instructions = stolen_bytes.instrs.clone();
 
-    for mut i in instructions {
+    for i in &mut instructions {
         if i.code() == Code::Int3 {
             i.set_code(Code::Nop_rm16);
         }
